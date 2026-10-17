@@ -48,13 +48,20 @@ pub fn list_models(settings: &TranslateSettings) -> Result<Vec<String>, String> 
         else if base.ends_with("/models") { base.to_string() }
         else { format!("{base}/models") };
     if settings.api_key.trim().is_empty() { return Err("API key required".into()); }
-    let raw = ureq::get(&url).set("Authorization", &format!("Bearer {}", settings.api_key.trim()))
+    let agent = http_agent(settings)?;
+    let raw = agent.get(&url).set("Authorization", &format!("Bearer {}", settings.api_key.trim()))
         .timeout(std::time::Duration::from_secs(15)).call()
         .map_err(|e| e.to_string())?.into_string().map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let models = v.get("data").and_then(|x| x.as_array()).ok_or_else(|| "No models returned".to_string())?
         .iter().filter_map(|x| x.get("id").and_then(|x| x.as_str()).map(str::to_owned)).collect::<Vec<_>>();
     if models.is_empty() { Err("No models returned".into()) } else { Ok(models) }
+}
+
+fn http_agent(settings: &TranslateSettings) -> Result<ureq::Agent, String> {
+    if settings.proxy.trim().is_empty() { return Ok(ureq::AgentBuilder::new().build()); }
+    let proxy = ureq::Proxy::new(settings.proxy.trim()).map_err(|e| format!("Invalid provider proxy: {e}"))?;
+    Ok(ureq::AgentBuilder::new().proxy(proxy).build())
 }
 
 /// `fallback`: F5 retries the free Edge endpoint if the configured API fails.
@@ -160,7 +167,8 @@ fn openai_translate(
     if key.starts_with("http://") || key.starts_with("https://") {
         return Err("Please enter the OpenAI API key itself, not the API key webpage URL".into());
     }
-    let mut req = ureq::post(&url)
+    let agent = http_agent(settings)?;
+    let mut req = agent.post(&url)
         .set("Content-Type", "application/json")
         .timeout(std::time::Duration::from_secs(30));
     if !key.is_empty() {
@@ -211,7 +219,8 @@ fn deepl_translate(
         deepl_url(configured_url)
     };
     log_translate("deepl", text.chars().count(), target);
-    let raw = match ureq::post(&url)
+    let agent = http_agent(settings)?;
+    let raw = match agent.post(&url)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .set(
             "Authorization",
@@ -259,7 +268,8 @@ fn baidu_translate(settings: &TranslateSettings, text: &str, target: &str) -> Re
     };
     let url = if base.contains("/api/trans/vip/translate") { base } else { format!("{base}/api/trans/vip/translate") };
     log_translate("baidu", text.chars().count(), to);
-    let raw = ureq::post(&url).set("Content-Type", "application/x-www-form-urlencoded")
+    let agent = http_agent(settings)?;
+    let raw = agent.post(&url).set("Content-Type", "application/x-www-form-urlencoded")
         .timeout(std::time::Duration::from_secs(20)).send_string(&body)
         .map_err(|e| redact_secret(&e.to_string(), &settings.api_key))?
         .into_string().map_err(|e| e.to_string())?;
@@ -359,6 +369,7 @@ mod tests {
             app_id: String::new(),
             model: "gpt-4o-mini".into(),
             target: "en".into(),
+            proxy: String::new(),
         };
         let out = translate_with(&settings, "zh_CN", "你好").unwrap();
         assert_eq!(out, "Hello from mock");
@@ -386,6 +397,7 @@ mod tests {
             app_id: String::new(),
             model: "gpt-4o-mini".into(),
             target: "en".into(),
+            proxy: String::new(),
         };
         let err = translate_with_opts(&settings, "en", "hello", false).unwrap_err();
         let _ = h.join();
@@ -413,6 +425,7 @@ mod tests {
             app_id: String::new(),
             model: String::new(),
             target: "en".into(),
+            proxy: String::new(),
         };
         let out = translate_with(&settings, "zh_CN", "你好").unwrap();
         assert_eq!(out, "Hello DeepL");

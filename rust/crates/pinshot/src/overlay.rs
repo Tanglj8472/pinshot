@@ -99,6 +99,7 @@ pub struct Overlay {
     mods: ModifiersState,
     history_max: u32,
     held_btn1: bool,
+    slider_drag: bool,
     /// Left-button gesture started on this overlay (Esc then asks 放弃截图?).
     interacted: bool,
     #[cfg(unix)]
@@ -128,6 +129,20 @@ pub struct Overlay {
 /// virtual desktop. A 1×1 pump fallback is a cold DWM surface if resized.
 fn overlay_hwnd_fits(inner_w: u32, inner_h: u32, cap_w: u32, cap_h: u32) -> bool {
     inner_w == cap_w && inner_h == cap_h && cap_w > 1 && cap_h > 1
+}
+
+fn overlay_key_is_actionable(key: &Key, synthetic: bool, repeat: bool) -> bool {
+    !synthetic && !(repeat && matches!(key, Key::Named(NamedKey::F1)))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_focus_keys_do_not_resnip() {
+    let f1 = Key::Named(NamedKey::F1);
+    assert!(!overlay_key_is_actionable(&f1, true, false));
+    assert!(!overlay_key_is_actionable(&f1, false, true));
+    assert!(overlay_key_is_actionable(&f1, false, false));
+    assert!(overlay_key_is_actionable(&Key::Named(NamedKey::Backspace), false, true));
 }
 
 fn overlay_window(
@@ -169,6 +184,7 @@ fn overlay_window(
             .with_decorations(false)
             .with_resizable(false)
             .with_visible(false)
+            .with_active(false)
             .with_position(PhysicalPosition::new(vx, vy))
             .with_inner_size(PhysicalSize::new(w, h))
             .with_window_level(winit::window::WindowLevel::AlwaysOnTop),
@@ -278,6 +294,7 @@ impl Overlay {
             mods: ModifiersState::empty(),
             history_max: history_max.max(1),
             held_btn1: false,
+            slider_drag: false,
             interacted: false,
             #[cfg(unix)]
             ptr_grab_ok: false,
@@ -361,12 +378,13 @@ impl Overlay {
             h,
             crate::win32::is_remote_session()
         ));
-        #[cfg(not(unix))]
-        native::focus_window(&s.window);
+        #[cfg(not(any(unix, windows)))]
+        native::focus_overlay_window(&s.window);
         // Capture already includes the taskbar. Cloak the live explorer
         // chrome so it cannot restack above this HWND and steal clicks.
         let t_trays = Instant::now();
         crate::logutil::step("before cloak trays");
+        #[cfg(not(windows))]
         native::cloak_shell_trays(true);
         crate::logutil::ms("overlay start cloak trays", t_trays);
         // After focus the taskbar may jump above an already-TOPMOST overlay.
@@ -1169,6 +1187,14 @@ impl Overlay {
     fn poll_overlay_pointer(&mut self) {}
 
     fn on_cursor_moved(&mut self, next: Point) {
+        if self.slider_drag {
+            self.cursor = next;
+            if let Some(TbAction::StrengthSet(v)) = self.toolbar.as_ref().and_then(|t| t.hit(next)) {
+                self.apply_tb(TbAction::StrengthSet(v));
+                self.mark_dirty();
+            }
+            return;
+        }
         if self.color_picker.is_some() {
             self.cursor = next;
             self.picker_drag(self.cursor);
@@ -1243,6 +1269,18 @@ impl Overlay {
             SelState::Creating | SelState::Moving | SelState::Resizing
         );
         let pt = self.cursor;
+        if button == MouseButton::Left {
+            if pressed {
+                if let Some(TbAction::StrengthSet(v)) = self.toolbar.as_ref().and_then(|t| t.hit(pt)) {
+                    self.slider_drag = true;
+                    self.apply_tb(TbAction::StrengthSet(v));
+                    self.mark_dirty();
+                    return;
+                }
+            } else {
+                self.slider_drag = false;
+            }
+        }
         if pressed && self.confirm.is_some() {
             if !self.held_btn1 {
                 let _ = self.hit_confirm(pt);
@@ -1526,20 +1564,24 @@ impl Overlay {
                     self.sync_ime();
                 }
             },
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                native::focus_window(&self.window);
+            WindowEvent::KeyboardInput { event, is_synthetic, .. }
+                if event.state == ElementState::Pressed => {
+                // A held capture key synthesized on focus is not a new action.
+                if !overlay_key_is_actionable(&event.logical_key, *is_synthetic, event.repeat) {
+                    return;
+                }
                 self.key(&event.logical_key, event.text.as_deref());
             }
             WindowEvent::Focused(focused) => {
                 if *focused {
-                    native::focus_window(&self.window);
+                    native::focus_overlay_window(&self.window);
                     #[cfg(unix)]
                     if let Some(g) = &self.key_grab {
                         g.kick();
                     }
                     self.sync_ime();
                 } else if self.result.is_none() {
-                    native::focus_window(&self.window);
+                    native::focus_overlay_window(&self.window);
                     #[cfg(unix)]
                     if let Some(g) = &self.key_grab {
                         g.kick();
@@ -1936,6 +1978,8 @@ impl Overlay {
             // window. Keep it cloaked until that transition has finished.
             self.window.set_visible(true);
             native::apply_overlay_style(&self.window);
+            native::focus_overlay_window(&self.window);
+            native::cloak_shell_trays(true);
             self.cover_desktop();
             self.front.present_full(hwnd_of(&self.window));
             native::cloak_window(&self.window, false);
@@ -2307,6 +2351,17 @@ mod keysym_tests {
         assert!(!overlay_hwnd_fits(1, 1, 4160, 1400));
         assert!(!overlay_hwnd_fits(4160, 1400, 1920, 1080));
         assert!(!overlay_hwnd_fits(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn focus_and_held_f1_do_not_restart_capture() {
+        let f1 = Key::Named(NamedKey::F1);
+        assert!(!super::overlay_key_is_actionable(&f1, true, false));
+        assert!(!super::overlay_key_is_actionable(&f1, false, true));
+        assert!(super::overlay_key_is_actionable(&f1, false, false));
+        let backspace = Key::Named(NamedKey::Backspace);
+        assert!(super::overlay_key_is_actionable(&backspace, false, true));
+        assert!(!super::overlay_key_is_actionable(&backspace, true, false));
     }
 
     #[test]

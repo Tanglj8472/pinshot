@@ -200,6 +200,14 @@ pub fn focus_window(window: &Window) {
     window.focus_window();
 }
 
+/// Screenshot focus must not inject Alt while the capture hotkey is held.
+pub fn focus_overlay_window(window: &Window) {
+    #[cfg(windows)]
+    crate::win32::focus_overlay_window(hwnd_of(window));
+    #[cfg(not(windows))]
+    focus_window(window);
+}
+
 #[cfg(unix)]
 pub fn release_stray_grabs() {
     crate::x11util::release_stray_grabs();

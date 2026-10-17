@@ -976,6 +976,7 @@ impl PrefsApp {
                 form_line(ui, tr("Baidu App ID:"), &mut self.draft.translate.app_id);
                 form_secret(ui, tr("Baidu Secret Key:"), &mut self.draft.translate.api_key);
             }
+            form_line(ui, tr("Provider proxy (optional):"), &mut self.draft.translate.proxy);
             if openai {
                 let model_hint = pinshot_core::translate::service_preset(
                     self.draft.translate.normalized_provider(),
@@ -1416,6 +1417,12 @@ fn form_slider<Num: egui::emath::Numeric>(
     ui.scope(|ui| {
         ui.spacing_mut().slider_width = CONTROL_W - ACTION_W - ui.spacing().item_spacing.x;
         ui.spacing_mut().interact_size.x = ACTION_W;
+        let visuals = ui.visuals_mut();
+        visuals.widgets.inactive.bg_fill = egui::Color32::from_gray(90);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 235, 235));
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 145, 235);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(35, 120, 215);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(2.5, egui::Color32::WHITE);
         ui.add_sized([CONTROL_W, ROW_H], egui::Slider::new(val, range));
     });
     ui.end_row();
@@ -1545,6 +1552,7 @@ mod tests {
                     app_id: String::new(),
                     model: "x".into(),
                     target: "ja".into(),
+            proxy: String::new(),
                 },
                 ..Config::default()
             },

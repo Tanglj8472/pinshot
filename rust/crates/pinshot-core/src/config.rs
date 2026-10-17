@@ -109,6 +109,8 @@ pub struct TranslateSettings {
     pub model: String,
     /// Edge/DeepL/OpenAI `to=` code (`en`, `zh-Hans`, …). Empty = follow UI language.
     pub target: String,
+    #[serde(default)]
+    pub proxy: String,
 }
 
 impl Default for TranslateSettings {
@@ -120,6 +122,7 @@ impl Default for TranslateSettings {
             app_id: String::new(),
             model: String::new(),
             target: String::new(),
+            proxy: String::new(),
         }
     }
 }
@@ -133,6 +136,7 @@ impl std::fmt::Debug for TranslateSettings {
             .field("app_id", &if self.app_id.is_empty() { "" } else { "***" })
             .field("model", &self.model)
             .field("target", &self.target)
+            .field("proxy", &if self.proxy.is_empty() { "" } else { "***" })
             .finish()
     }
 }

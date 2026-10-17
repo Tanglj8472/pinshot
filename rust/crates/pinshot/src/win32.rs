@@ -122,6 +122,16 @@ pub fn show_noactivate(hwnd: HWND) {
     }
 }
 
+pub fn focus_overlay_window(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    if hwnd.is_invalid() { return; }
+    unsafe {
+        if GetForegroundWindow() != hwnd && !SetForegroundWindow(hwnd).as_bool() {
+            crate::logutil::log_at("trace", "overlay foreground request declined");
+        }
+    }
+}
+
 pub fn apply_overlay_style(hwnd: HWND) {
     unsafe {
         // Overlapped / caption windows are inset to the work area, so the

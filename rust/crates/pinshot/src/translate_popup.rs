@@ -4,7 +4,7 @@ use std::rc::Rc;
 use pinshot_core::geom::Point;
 use pinshot_core::icons::app_icon_rgba;
 use softbuffer::{Context, Surface};
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -29,11 +29,15 @@ impl TranslatePopup {
         let width = (420.0 + (max_chars.min(80) as f64 * 2.0)).clamp(420.0, 760.0);
         let (iw, ih, rgba) = app_icon_rgba(32);
         let icon = winit::window::Icon::from_rgba(rgba, iw, ih).ok();
+        let cursor = crate::native::cursor_screen().unwrap_or((0, 0));
+        let desk = crate::native::virtual_desktop();
+        let (x, y) = pinshot_core::geom::place_near_cursor(cursor, (width as u32, height as u32), desk);
         let window = Rc::new(event_loop.create_window(
             Window::default_attributes()
                 .with_title("PinShot - Translation")
                 .with_window_icon(icon)
                 .with_inner_size(LogicalSize::new(width, height))
+                .with_position(PhysicalPosition::new(x, y))
                 .with_resizable(true),
         ).map_err(|e| e.to_string())?);
         crate::native::exclude_from_capture(&window);

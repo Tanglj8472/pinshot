@@ -250,6 +250,9 @@ pub struct Shape {
     pub text: String,
     #[serde(default)]
     pub number: i32,
+    /// Stable identity for the experimental automation editor; absent in ordinary documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_id: Option<u64>,
 }
 
 impl Shape {
@@ -263,6 +266,7 @@ impl Shape {
             style,
             text: String::new(),
             number: 0,
+            automation_id: None,
         }
     }
 
@@ -578,6 +582,22 @@ impl Annotator {
             return true;
         }
         false
+    }
+
+    pub fn automation_busy(&self) -> bool {
+        self.live.is_some() || self.text_edit.is_some() || self.sel_mode.is_some()
+            || self.pending_text_click.is_some() || self.line_click_mode
+    }
+
+    pub fn replace_automation_shapes(&mut self, shapes: Vec<Shape>) {
+        self.push_edit();
+        self.shapes = shapes;
+        self.selected = None;
+        self.selection_locked.clear();
+        self.edit_target = None;
+        self.width_target = None;
+        self.wheel_target = None;
+        self.renumber();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -1885,6 +1905,22 @@ impl Annotator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automation_identity_survives_editor_history() {
+        let mut editor = Annotator::new();
+        let mut shape = Shape::new(Tool::Rect, vec![Point::new(5.0, 5.0), Point::new(30.0, 30.0)], Style::default());
+        shape.automation_id = Some(42);
+        editor.replace_automation_shapes(vec![shape.clone()]);
+        assert_eq!(editor.shapes[0].automation_id, Some(42));
+        assert!(editor.undo());
+        assert!(editor.shapes.is_empty());
+        assert!(editor.redo());
+        assert_eq!(editor.shapes[0].automation_id, Some(42));
+        assert!(!editor.automation_busy());
+        editor.live = Some(shape);
+        assert!(editor.automation_busy());
+    }
+
 
     fn rect_shape() -> Shape {
         Shape::new(

@@ -60,6 +60,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let proxy = event_loop.create_proxy();
     crate::ipc::spawn_server(proxy.clone());
+    if args.iter().any(|arg| arg == "--automation") {
+        crate::automation::spawn_server(proxy.clone())?;
+        crate::logutil::log("native automation enabled");
+    }
 
     let mut group_vis = HashMap::new();
     for g in &cfg.groups {
@@ -74,6 +78,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         fallback: None,
         overlay: None,
         pins: Vec::new(),
+        automation_pins: HashMap::new(),
         closed: ClosedStack::default(),
         history: SnipHistory::new(),
         group_vis,
@@ -176,6 +181,7 @@ struct App {
     fallback: Option<FallbackWin>,
     overlay: Option<Overlay>,
     pins: Vec<PinWin>,
+    automation_pins: HashMap<u64, PinWin>,
     closed: ClosedStack,
     history: SnipHistory,
     group_vis: HashMap<String, bool>,
@@ -1333,6 +1339,101 @@ impl App {
 }
 
 impl App {
+    fn reap_automation_pins(&mut self) {
+        let closed = self.automation_pins.iter().filter(|(_, pin)| pin.closed).map(|(id, _)| *id).collect::<Vec<_>>();
+        for id in closed {
+            if let Some(mut pin) = self.automation_pins.remove(&id) {
+                pin.annot.finish();
+                crate::automation::normalize_ids(&mut pin.annot.shapes);
+                crate::automation::publish_closed(id, pin.annot.shapes.clone());
+            }
+        }
+    }
+
+    fn automation_edit(&mut self, session: u64, command: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.reap_automation_pins();
+        let Some(pin) = self.automation_pins.get_mut(&session) else { return Ok(serde_json::json!({"open": false})); };
+        let op = command["op"].as_str().ok_or("Missing editor operation")?;
+        crate::automation::normalize_ids(&mut pin.annot.shapes);
+        let busy = pin.annot.automation_busy();
+        if op != "snapshot" && busy { return Err("Finish the active drawing or text edit first".into()); }
+        match op {
+            "snapshot" => {}
+            "apply" => {
+                let expected: Vec<pinshot_core::annotation::Shape> = serde_json::from_value(command["expected"].clone()).map_err(|e| e.to_string())?;
+                if pin.annot.shapes != expected { return Err("Editor changed concurrently; query state and retry".into()); }
+                let shapes: Vec<pinshot_core::annotation::Shape> = serde_json::from_value(command["shapes"].clone()).map_err(|e| e.to_string())?;
+                pin.annot.replace_automation_shapes(shapes);
+                pin.automation_refresh();
+            }
+            "undo" => { pin.annot.undo(); pin.automation_refresh(); }
+            "redo" => { pin.annot.redo(); pin.automation_refresh(); }
+            "edit" => {
+                let tool = command["tool"].as_str().and_then(pinshot_core::annotation::Tool::from_id).ok_or("Unsupported editor tool")?;
+                pin.show_toolbar(true);
+                pin.annot.set_tool(Some(tool));
+                if command["tool"] == "arrow" {
+                    pin.annot.style_mut(pinshot_core::annotation::Tool::Line).set_arrow_kind(pinshot_core::annotation::ArrowKind::Thin);
+                }
+                pin.automation_refresh();
+            }
+            _ => return Err("Unknown editor operation".into()),
+        }
+        crate::automation::normalize_ids(&mut pin.annot.shapes);
+        Ok(serde_json::json!({"open": true, "busy": busy, "shapes": pin.annot.shapes,
+            "can_undo": pin.annot.can_undo(), "can_redo": pin.annot.can_redo(), "editing": pin.annotating,
+            "window_id": format!("{:?}", pin.window_id())}))
+    }
+
+    fn automation_view(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        action: &str,
+        session_id: u64,
+        image: Option<std::sync::Arc<pinshot_core::raster::Raster>>,
+        shapes: Vec<pinshot_core::annotation::Shape>,
+    ) -> Result<serde_json::Value, String> {
+        self.reap_automation_pins();
+        if action == "state" {
+            return Ok(serde_json::json!(self.automation_pins.iter().filter(|(_, pin)| pin.is_visible()).map(|(id, pin)| serde_json::json!({
+                "session_id": id, "window_id": format!("{:?}", pin.window_id()),
+                "visible": pin.is_visible(), "scale": pin.scale, "position": pin.pos(),
+                "editing": pin.annotating, "busy": pin.annot.automation_busy()
+            })).collect::<Vec<_>>()));
+        }
+        if action == "hide" {
+            if let Some(pin) = self.automation_pins.get_mut(&session_id) {
+                pin.annot.finish();
+                crate::automation::normalize_ids(&mut pin.annot.shapes);
+                pin.hide();
+            }
+            return Ok(serde_json::json!({"visible": false}));
+        }
+        if action == "close" {
+            if let Some(mut pin) = self.automation_pins.remove(&session_id) {
+                pin.annot.finish();
+                crate::automation::normalize_ids(&mut pin.annot.shapes);
+                crate::automation::publish_closed(session_id, pin.annot.shapes.clone());
+            }
+            return Ok(serde_json::json!({"visible": false}));
+        }
+        if action != "show" { return Err("Unknown view operation".into()); }
+        if !self.automation_pins.contains_key(&session_id) {
+            let frame = image.as_ref().ok_or("Missing preview image")?;
+            let scale = (960.0 / frame.width.max(1) as f32).min(640.0 / frame.height.max(1) as f32).min(1.0).max(0.05);
+            let pos = native::pin_pos_near_cursor((frame.width as f32 * scale) as u32, (frame.height as f32 * scale) as u32);
+            let mut pin = PinWin::create_at_scale(event_loop, (**frame).clone(), pos, scale, shapes)?;
+            pin.automation_mode = true;
+            pin.automation_refresh();
+            pin.window().set_title("PinShot AI");
+            self.automation_pins.insert(session_id, pin);
+        }
+        let pin = self.automation_pins.get(&session_id).ok_or("Missing preview window")?;
+        pin.show();
+        Ok(serde_json::json!({"visible": pin.is_visible(), "window_id": format!("{:?}", pin.window_id()),
+            "scale": pin.scale, "position": pin.pos()}))
+    }
+
     fn dispatch_user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Hotkey(command) => self.handle_hotkey(event_loop, command),
@@ -1352,6 +1453,14 @@ impl App {
             }
             AppEvent::PinMenu(action) => self.apply_pin_menu(action),
             AppEvent::Ipc(cmd) => self.handle_ipc_command(cmd),
+            AppEvent::AutomationEdit { session_id, command, response } => {
+                let result = self.automation_edit(session_id, command);
+                let _ = response.send(result);
+            }
+            AppEvent::AutomationView { action, session_id, image, shapes, response } => {
+                let result = self.automation_view(event_loop, &action, session_id, image, shapes);
+                let _ = response.send(result);
+            }
             AppEvent::OcrProgress { pin, message } => self.handle_ocr_progress(pin, message),
             AppEvent::OcrDone { pin, result, translate } => {
                 self.handle_ocr_done(pin, result, translate)
@@ -1538,6 +1647,24 @@ impl App {
 
 impl App {
     fn dispatch_window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if let Some(session) = self.automation_pins.iter().find(|(_, pin)| pin.window_id() == id).map(|(session, _)| *session) {
+            if let Some(pin) = self.automation_pins.get_mut(&session) {
+                match &event {
+                    WindowEvent::MouseInput { button: MouseButton::Right, state: ElementState::Pressed, .. } => {
+                        if pin.annotating { pin.annot.right_click(); pin.automation_refresh(); } else { pin.close(); }
+                    }
+                    WindowEvent::KeyboardInput { event: key, .. } => {
+                        let changes_base = pin.annot.text_edit.is_none() && matches!(&key.logical_key, Key::Character(c) if c == "3" || c == "4" || ((c == "1" || c == "2") && pin.annot.tool.is_none()));
+                        let unsupported_job = matches!(&key.logical_key, Key::Named(NamedKey::F5));
+                        if !changes_base && !unsupported_job { pin.handle(&event); }
+                    }
+                    _ => pin.handle(&event),
+                }
+                crate::automation::normalize_ids(&mut pin.annot.shapes);
+            }
+            self.reap_automation_pins();
+            return;
+        }
         if let WindowEvent::ModifiersChanged(m) = &event {
             self.mods = m.state();
         }
@@ -1703,6 +1830,9 @@ impl App {
 
 impl App {
     fn maintain_windows(&mut self, event_loop: &ActiveEventLoop) {
+        for pin in self.automation_pins.values_mut() { pin.tick_glow(); pin.pump_redraw(); }
+        self.reap_automation_pins();
+
         let mut persist = false;
         for p in &mut self.pins {
             p.tick_glow();

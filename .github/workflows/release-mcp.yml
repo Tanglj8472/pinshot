@@ -1,0 +1,79 @@
+name: release-mcp-preview
+
+on:
+  push:
+    branches: [cursor/pinshot-mcp-stdio-d7e3]
+    paths: ['.github/workflows/release-mcp.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify tested native source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/actions/runs/39365625561 > /tmp/native-run.json
+          node -e 'const r=require("/tmp/native-run.json"); if(r.conclusion!=="success" || r.head_sha!=="6f84ca265f0c3481ba4e5b56c0ef3c7432bfa1de") process.exit(1)'
+          git merge-base --is-ancestor 6f84ca265f0c3481ba4e5b56c0ef3c7432bfa1de HEAD
+          git diff --exit-code 6f84ca265f0c3481ba4e5b56c0ef3c7432bfa1de HEAD -- rust tools packaging pinshot-mcp
+      - name: Build and test MCP server
+        working-directory: pinshot-mcp
+        run: |
+          npm ci
+          npm run build
+          npm run smoke
+          npm prune --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: pinshot-windows-x64-packages
+          path: release
+          run-id: 39365625561
+          github-token: ${{ github.token }}
+      - name: Package MCP runtime
+        run: |
+          mkdir -p /tmp/pinshot-mcp
+          cp -r pinshot-mcp/dist pinshot-mcp/node_modules /tmp/pinshot-mcp/
+          cp pinshot-mcp/package.json pinshot-mcp/package-lock.json pinshot-mcp/README.md pinshot-mcp/CURRENT_STATUS.md /tmp/pinshot-mcp/
+          cd /tmp
+          zip -qr "$GITHUB_WORKSPACE/release/pinshot-mcp-0.2.12-mcp.1.zip" pinshot-mcp
+      - name: Write release notes and checksums
+        run: |
+          cat > /tmp/mcp-notes.md <<'EOF'
+          ## PinShot MCP 预发布版
+
+          此版本用于测试 AI 驱动 PinShot，不替代正式版更新通道。原生程序基于提交 6f84ca2，复用已通过 Windows 构建、测试及安装回归的产物；Linux 构建亦通过。
+
+          - 支持全屏和指定窗口截图，直接向 AI 返回图片预览。
+          - 支持原生标注、预览、保存、窗口显示/隐藏、撤销和重做，共 15 个 MCP 工具。
+          - 本机已验证图片读取、标注、撤销重做、保存和会话管理。手工绘制双向同步仍需进一步验收。
+
+          ### 使用
+
+          1. 安装安装包或解压便携包；退出旧实例，再以 `pinshot.exe --automation` 启动。
+          2. 解压 `pinshot-mcp-0.2.12-mcp.1.zip`，需要 Node.js 20 或更高版本，包内已含运行依赖。
+          3. MCP 客户端配置 command 为 `node`，args 为解压后 `pinshot-mcp/dist/index.js` 的绝对路径。
+          4. 重新连接 MCP，先调用 ping，再测试截图。
+
+          原生安装包内部版本仍为 0.2.12；MCP 包按本次预发布标签区分。Windows-MCP 是另外安装的第三方桌面控制服务，不包含在此包中。PinShot MCP 本身不提供通用鼠标键盘控制、OCR、翻译或设置控制。
+
+          发布包的签名状态以原生 SHA256SUMS.txt 为准；校验和不等同于代码签名。
+          EOF
+          cd release
+          sha256sum *.exe *.zip > MCP-SHA256SUMS.txt
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v0.2.12-mcp.1 release/* --target "$GITHUB_SHA" --title 'PinShot 0.2.12 MCP Preview 1' --prerelease --notes-file /tmp/mcp-notes.md

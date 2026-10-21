@@ -31,6 +31,21 @@ impl Capture {
         result
     }
 
+    /// Capture after window activation or overlay close.
+    ///
+    /// Windows DXGI can return one stale compositor frame. X11 `XGetImage` /
+    /// `XShmGetImage` already read current root pixels, so this is one
+    /// `InputHold` plus one snapshot. Do not nest it inside another hold —
+    /// use `grab_while_held` for that.
+    pub fn grab_fresh(dump: bool) -> Result<Self, String> {
+        let t0 = std::time::Instant::now();
+        let hold = crate::x11util::InputHold::grab();
+        let result = Self::finish_grab(grab_inner(), dump);
+        drop(hold);
+        crate::logutil::ms("capture grab fresh", t0);
+        result
+    }
+
     /// Capture while the caller already holds `InputHold` (Python `_snip_now`).
     pub fn grab_while_held(dump: bool) -> Result<Self, String> {
         let t0 = std::time::Instant::now();
@@ -207,4 +222,37 @@ fn decode_zpixmap(w: u32, h: u32, depth: u8, data: &[u8]) -> Result<Raster, Stri
         }
     }
     Raster::from_rgba(w, h, rgba).ok_or_else(|| "rgba".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grab_fresh_matches_grab_signature() {
+        let grab: fn(bool) -> Result<Capture, String> = Capture::grab;
+        let fresh: fn(bool) -> Result<Capture, String> = Capture::grab_fresh;
+        let held: fn(bool) -> Result<Capture, String> = Capture::grab_while_held;
+        let _ = (grab, fresh, held);
+    }
+
+    #[test]
+    fn grab_fresh_takes_its_own_input_hold() {
+        // Automation window capture calls grab_fresh without a pre-held
+        // InputHold. Headless CI has no X server; the method must still exist
+        // and fail at connect rather than at a missing API.
+        match Capture::grab_fresh(false) {
+            Ok(cap) => {
+                assert!(cap.composed.width >= 1);
+                assert!(cap.composed.height >= 1);
+                assert!(!cap.backend.is_empty());
+            }
+            Err(e) => {
+                assert!(
+                    e.contains("X11 connect") || e.contains("root is 0"),
+                    "unexpected grab_fresh error: {e}"
+                );
+            }
+        }
+    }
 }

@@ -55,6 +55,7 @@ cargo run --release --bin pinshot --features ocr -- --debug
 - `packaging/`：Windows 安装程序配置和安装回归测试。
 - `tools/`：构建、运行库检查和系统验证脚本。
 - `docs/`：设计说明、日志说明和验证记录。
+- `pinshot-mcp/`：旁路最小 MCP Server（stdio + `ping`），不参与截图主程序。见该目录下的中文 README。
 
 ## 开发与验证
 

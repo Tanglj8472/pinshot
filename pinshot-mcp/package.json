@@ -1,0 +1,26 @@
+{
+  "name": "pinshot-mcp",
+  "version": "0.2.0",
+  "private": true,
+  "description": "PinShot 旁路最小 MCP Server：stdio 传输，仅暴露 ping",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "smoke": "tsx scripts/smoke.ts",
+    "test:workflow": "tsx scripts/workflow.ts",
+    "inspector": "npx --yes @modelcontextprotocol/inspector tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.8",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
